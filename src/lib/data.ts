@@ -1,9 +1,11 @@
 import type { User, Unit } from './types';
 
+// IMPORTANT: Replace placeholder emails with actual emails used for these users in Appwrite.
+// Passwords here MUST match the passwords set for these users in Appwrite console.
 export const users: User[] = [
-  { id: 'teacher-vladislav', username: 'Vladislav', password: 'Vladislav15', role: 'teacher', name: 'Ермилов Владислав' },
-  { id: 'student-oksana', username: 'Oksana', password: 'Oksana25', role: 'student', name: 'Юрченко Оксана' },
-  { id: 'student-alexander', username: 'Alexander', password: 'Alexander23', role: 'student', name: 'Ермилов Александр' },
+  { id: 'teacher-vladislav', username: 'Vladislav', email: 'vladigra121@gmail.com', password: 'Vladislav15', role: 'teacher', name: 'Ермилов Владислав' },
+  { id: 'student-oksana', username: 'Oksana', email: 'ou026216@gmail.com', password: 'Oksana25', role: 'student', name: 'Юрченко Оксана' },
+  { id: 'student-alexander', username: 'Alexander', email: 'aleksanderermilov439@gmail.com', password: 'Alexander23', role: 'student', name: 'Ермилов Александр' },
 ];
 
 export const units: Unit[] = [

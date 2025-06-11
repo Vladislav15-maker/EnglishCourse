@@ -1,3 +1,4 @@
+
 "use client";
 
 import type { User } from '@/lib/types';
@@ -5,6 +6,17 @@ import { users as predefinedUsers } from '@/lib/data';
 import { useRouter } from 'next/navigation';
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { useToast } from '@/hooks/use-toast';
+import { Client, Account } from 'appwrite';
+
+const APPWRITE_ENDPOINT = 'https://fra.cloud.appwrite.io/v1';
+const APPWRITE_PROJECT_ID = '68490a67000756367bee';
+
+const client = new Client();
+client
+    .setEndpoint(APPWRITE_ENDPOINT)
+    .setProject(APPWRITE_PROJECT_ID);
+
+const account = new Account(client);
 
 interface AuthContextType {
   currentUser: User | null;
@@ -22,40 +34,77 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const { toast } = useToast();
 
   useEffect(() => {
-    // Attempt to load user from localStorage on initial load
-    try {
-      const storedUser = localStorage.getItem('currentUser');
-      if (storedUser) {
-        setCurrentUser(JSON.parse(storedUser));
+    const checkSession = async () => {
+      setLoading(true);
+      try {
+        const appwriteUser = await account.get();
+        console.log("[AuthContext] Appwrite session found:", appwriteUser);
+        // Find corresponding user in our predefinedUsers
+        const matchedUser = predefinedUsers.find(u => u.id === appwriteUser.$id);
+        if (matchedUser) {
+          const { password, ...userToStore } = matchedUser;
+          setCurrentUser(userToStore);
+          localStorage.setItem('currentUser', JSON.stringify(userToStore));
+          console.log("[AuthContext] User set from active Appwrite session:", userToStore);
+        } else {
+          // Appwrite session exists, but user not in our local list. This is an edge case.
+          // For now, clear Appwrite session and local storage.
+          console.warn("[AuthContext] Appwrite session user not in predefined list. Logging out.");
+          await account.deleteSession('current');
+          localStorage.removeItem('currentUser');
+          setCurrentUser(null);
+        }
+      } catch (error) {
+        // No active Appwrite session, try loading from localStorage (e.g., if Appwrite session expired but local one didn't)
+        // However, it's better to rely on Appwrite as the source of truth for session.
+        // If no Appwrite session, treat as logged out.
+        console.log("[AuthContext] No active Appwrite session or error fetching account.", error);
+        localStorage.removeItem('currentUser'); // Clear potentially stale local user
+        setCurrentUser(null);
+      } finally {
+        setLoading(false);
       }
-    } catch (error) {
-      console.error("Failed to load user from localStorage", error);
-      localStorage.removeItem('currentUser');
-    }
-    setLoading(false);
+    };
+    checkSession();
   }, []);
+
 
   const login = async (username: string, password_provided: string): Promise<boolean> => {
     setLoading(true);
     const user = predefinedUsers.find(
       (u) => u.username === username && u.password === password_provided
     );
+
     if (user) {
-      const { password, ...userToStore } = user; // Don't store password
-      setCurrentUser(userToStore);
       try {
+        // First, try to log into Appwrite
+        console.log(`[AuthContext] Attempting Appwrite login for: ${user.email}`);
+        await account.createEmailPasswordSession(user.email, password_provided);
+        console.log("[AuthContext] Appwrite login successful.");
+
+        // If Appwrite login is successful, then set local state
+        const { password, ...userToStore } = user;
+        setCurrentUser(userToStore);
         localStorage.setItem('currentUser', JSON.stringify(userToStore));
-      } catch (error) {
-         console.error("Failed to save user to localStorage", error);
+        toast({ title: "Login Successful", description: `Welcome, ${user.name}!` });
+        
+        if (user.role === 'teacher') {
+          router.push('/teacher/dashboard');
+        } else {
+          router.push('/student/dashboard');
+        }
+        setLoading(false);
+        return true;
+      } catch (appwriteError) {
+        console.error("[AuthContext] Appwrite login failed:", appwriteError);
+        toast({ title: "Login Failed", description: "Could not establish session with authentication service.", variant: "destructive" });
+        // Ensure user is logged out if Appwrite session fails
+        setCurrentUser(null);
+        localStorage.removeItem('currentUser');
+        try { await account.deleteSession('current'); } catch (e) { /* ignore */ }
+        setLoading(false);
+        return false;
       }
-      toast({ title: "Login Successful", description: `Welcome, ${user.name}!` });
-      setLoading(false);
-      if (user.role === 'teacher') {
-        router.push('/teacher/dashboard');
-      } else {
-        router.push('/student/dashboard');
-      }
-      return true;
     } else {
       toast({ title: "Login Failed", description: "Invalid username or password.", variant: "destructive" });
       setLoading(false);
@@ -63,15 +112,21 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     }
   };
 
-  const logout = () => {
-    setCurrentUser(null);
+  const logout = async () => { // Made logout async
+    setLoading(true);
     try {
-      localStorage.removeItem('currentUser');
+      await account.deleteSession('current');
+      console.log("[AuthContext] Appwrite session deleted.");
     } catch (error) {
-      console.error("Failed to remove user from localStorage", error);
+      console.error("[AuthContext] Error deleting Appwrite session:", error);
+      // Continue with local logout anyway
+    } finally {
+      setCurrentUser(null);
+      localStorage.removeItem('currentUser');
+      router.push('/');
+      toast({ title: "Logged Out", description: "You have been successfully logged out." });
+      setLoading(false);
     }
-    router.push('/');
-    toast({ title: "Logged Out", description: "You have been successfully logged out." });
   };
   
   // Prevent access to /student or /teacher routes if not logged in or incorrect role
@@ -80,7 +135,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
 
     const path = window.location.pathname;
     if (!currentUser && (path.startsWith('/student') || path.startsWith('/teacher'))) {
-      router.push('/');
+      if(path !== "/") router.push('/'); // Avoid pushing to '/' if already there
     } else if (currentUser) {
       if (currentUser.role === 'student' && path.startsWith('/teacher')) {
         router.push('/student/dashboard');

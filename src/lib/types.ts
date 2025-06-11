@@ -1,6 +1,8 @@
+
 export interface User {
   id: string;
   username: string;
+  email: string; // Added for Appwrite session
   password?: string; // Optional as it won't be stored in context after login
   role: 'teacher' | 'student';
   name: string;
