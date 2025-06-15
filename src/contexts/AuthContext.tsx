@@ -1,4 +1,3 @@
-
 "use client";
 
 import type { User } from '@/lib/types';
@@ -6,7 +5,8 @@ import { users as predefinedUsers } from '@/lib/data';
 import { useRouter } from 'next/navigation';
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { useToast } from '@/hooks/use-toast';
-import { Client, Account } from 'appwrite';
+import { Client, Account, AppwriteException } from 'appwrite';
+// import { useAppData } from './AppDataContext'; // Удалено это импортирование
 
 const APPWRITE_ENDPOINT = 'https://fra.cloud.appwrite.io/v1';
 const APPWRITE_PROJECT_ID = '68490a67000756367bee';
@@ -21,7 +21,7 @@ const account = new Account(client);
 interface AuthContextType {
   currentUser: User | null;
   login: (username: string, password_provided: string) => Promise<boolean>;
-  logout: () => void;
+  logout: () => Promise<void>;
   loading: boolean;
 }
 
@@ -32,6 +32,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [loading, setLoading] = useState(true);
   const router = useRouter();
   const { toast } = useToast();
+  // const appData = useAppData(); // Эта строка вызывала ошибку и была удалена
 
   useEffect(() => {
     const checkSession = async () => {
@@ -39,7 +40,6 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       try {
         const appwriteUser = await account.get();
         console.log("[AuthContext] Appwrite session found:", appwriteUser);
-        // Find corresponding user in our predefinedUsers
         const matchedUser = predefinedUsers.find(u => u.id === appwriteUser.$id);
         if (matchedUser) {
           const { password, ...userToStore } = matchedUser;
@@ -47,19 +47,18 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
           localStorage.setItem('currentUser', JSON.stringify(userToStore));
           console.log("[AuthContext] User set from active Appwrite session:", userToStore);
         } else {
-          // Appwrite session exists, but user not in our local list. This is an edge case.
-          // For now, clear Appwrite session and local storage.
-          console.warn("[AuthContext] Appwrite session user not in predefined list. Logging out.");
+          console.warn("[AuthContext] Appwrite session user not in predefined list. Logging out Appwrite session.");
           await account.deleteSession('current');
           localStorage.removeItem('currentUser');
           setCurrentUser(null);
         }
       } catch (error) {
-        // No active Appwrite session, try loading from localStorage (e.g., if Appwrite session expired but local one didn't)
-        // However, it's better to rely on Appwrite as the source of truth for session.
-        // If no Appwrite session, treat as logged out.
-        console.log("[AuthContext] No active Appwrite session or error fetching account.", error);
-        localStorage.removeItem('currentUser'); // Clear potentially stale local user
+        if (error instanceof AppwriteException && error.code === 401) {
+             console.log("[AuthContext] No active Appwrite session (account.get() returned 401).");
+        } else {
+            console.error("[AuthContext] Error fetching Appwrite account during session check:", error);
+        }
+        localStorage.removeItem('currentUser');
         setCurrentUser(null);
       } finally {
         setLoading(false);
@@ -77,17 +76,15 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
 
     if (user) {
       try {
-        // First, try to log into Appwrite
-        console.log(`[AuthContext] Attempting Appwrite login for: ${user.email}`);
+        console.log(`[AuthContext] Attempting Appwrite login for: ${user.email} with id: ${user.id}`);
         await account.createEmailPasswordSession(user.email, password_provided);
         console.log("[AuthContext] Appwrite login successful.");
 
-        // If Appwrite login is successful, then set local state
         const { password, ...userToStore } = user;
         setCurrentUser(userToStore);
         localStorage.setItem('currentUser', JSON.stringify(userToStore));
         toast({ title: "Login Successful", description: `Welcome, ${user.name}!` });
-        
+
         if (user.role === 'teacher') {
           router.push('/teacher/dashboard');
         } else {
@@ -95,13 +92,13 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         }
         setLoading(false);
         return true;
-      } catch (appwriteError) {
-        console.error("[AuthContext] Appwrite login failed:", appwriteError);
-        toast({ title: "Login Failed", description: "Could not establish session with authentication service.", variant: "destructive" });
-        // Ensure user is logged out if Appwrite session fails
+      } catch (appwriteError: any) {
+        // Выводим более подробную информацию об ошибке Appwrite
+        console.error(`[AuthContext] Appwrite login failed for ${user.email}. Code: ${appwriteError.code}, Message: ${appwriteError.message}. Raw error:`, appwriteError);
+        toast({ title: "Login Failed", description: appwriteError.message || "Could not establish session with authentication service.", variant: "destructive" });
         setCurrentUser(null);
         localStorage.removeItem('currentUser');
-        try { await account.deleteSession('current'); } catch (e) { /* ignore */ }
+        try { await account.deleteSession('current'); } catch (e) { /* ignore if no session */ }
         setLoading(false);
         return false;
       }
@@ -112,34 +109,49 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     }
   };
 
-  const logout = async () => { // Made logout async
-    setLoading(true);
+  const logout = async () => {
+    console.log("[AuthContext] Logout initiated.");
+    // Прямой вызов appData.flushPendingSaves() здесь больше не нужен.
+    // AppDataProvider.useEffect будет отслеживать currentUser и запускать flush,
+    // когда currentUser станет null.
+
+    const userLoggingOut = currentUser; // Запоминаем текущего пользователя для логирования
+
+    setLoading(true); 
     try {
       await account.deleteSession('current');
       console.log("[AuthContext] Appwrite session deleted.");
     } catch (error) {
-      console.error("[AuthContext] Error deleting Appwrite session:", error);
-      // Continue with local logout anyway
+      if (error instanceof AppwriteException && error.code === 401) {
+        console.log("[AuthContext] No active Appwrite session to delete, or session already invalid.");
+      } else {
+        console.error("[AuthContext] Error deleting Appwrite session:", error);
+      }
     } finally {
-      setCurrentUser(null);
+      setCurrentUser(null); // Это изменение вызовет useEffect в AppDataProvider
       localStorage.removeItem('currentUser');
       router.push('/');
       toast({ title: "Logged Out", description: "You have been successfully logged out." });
+      console.log(`[AuthContext] Local user state cleared for ${userLoggingOut?.id}, navigated to login.`);
       setLoading(false);
     }
   };
-  
-  // Prevent access to /student or /teacher routes if not logged in or incorrect role
+
   useEffect(() => {
     if (loading) return;
 
     const path = window.location.pathname;
     if (!currentUser && (path.startsWith('/student') || path.startsWith('/teacher'))) {
-      if(path !== "/") router.push('/'); // Avoid pushing to '/' if already there
+      if(path !== "/") {
+        console.log("[AuthContext] No user, but on protected route. Redirecting to /");
+        router.push('/');
+      }
     } else if (currentUser) {
       if (currentUser.role === 'student' && path.startsWith('/teacher')) {
+        console.log("[AuthContext] Student on teacher route. Redirecting to student dashboard.");
         router.push('/student/dashboard');
       } else if (currentUser.role === 'teacher' && path.startsWith('/student')) {
+        console.log("[AuthContext] Teacher on student route. Redirecting to teacher dashboard.");
         router.push('/teacher/dashboard');
       }
     }
